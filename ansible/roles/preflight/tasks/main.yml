@@ -29,6 +29,15 @@
       - matrix_ssh_port | int < 65536
     fail_msg: 'Deployment variables are incomplete or invalid.'
 
+- name: Validate Let's Encrypt contact email
+  ansible.builtin.assert:
+    that:
+      - certbot_email is match('^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$')
+      - (certbot_email | lower | regex_search('@(?:[^@]+\.)*example\.(?:com|org|net)$')) is none
+    fail_msg: >-
+      A real Let's Encrypt contact email is required.
+      Placeholder addresses under example.com, example.org or example.net are not accepted.
+
 - name: Require a globally routable public IPv4
   ansible.builtin.command:
     argv:
@@ -50,6 +59,38 @@
       - "import ipaddress,sys; a=ipaddress.ip_address(sys.argv[1]); assert a.version == 4"
       - "{{ coturn_relay_ip }}"
   changed_when: false
+
+- name: Validate host resources
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['memtotal_mb'] | int >= 2048
+      - ansible_facts.get('processor_vcpus', ansible_facts.get('processor_count', 1)) | int >= 2
+    fail_msg: >-
+      Minimum supported host size is 2 vCPU and 2 GiB RAM.
+      Detected {{ ansible_facts.get('processor_vcpus', ansible_facts.get('processor_count', 1)) }} vCPU,
+      {{ ansible_facts['memtotal_mb'] }} MiB RAM.
+
+- name: Read root filesystem capacity
+  ansible.builtin.set_fact:
+    matrix_root_mount: >-
+      {{ (ansible_facts['mounts'] | selectattr('mount', 'equalto', '/') | list | first) }}
+
+- name: Require at least 20 GiB root filesystem
+  ansible.builtin.assert:
+    that:
+      - matrix_root_mount.size_total | int >= 21474836480
+    fail_msg: >-
+      The root filesystem is too small for Matrix Deploy.
+      At least 20 GiB total capacity is required on /; 30 GiB or more is recommended.
+      Detected {{ ((matrix_root_mount.size_total | int) / 1073741824) | round(1) }} GiB.
+
+- name: Require at least 10 GiB free on root filesystem
+  ansible.builtin.assert:
+    that:
+      - matrix_root_mount.size_available | int >= 10737418240
+    fail_msg: >-
+      At least 10 GiB free space is required on / before deployment.
+      Detected {{ ((matrix_root_mount.size_available | int) / 1073741824) | round(1) }} GiB free.
 
 - name: Ensure Matrix Deploy state directory exists for version lock
   ansible.builtin.file:
@@ -121,27 +162,6 @@
       - "{{ matrix_domains.element_call }}"
       - "{{ matrix_domains.livekit }}"
       - "{{ matrix_domains.turn }}"
-
-- name: Validate host resources
-  ansible.builtin.assert:
-    that:
-      - ansible_facts['memtotal_mb'] | int >= 2048
-      - ansible_facts.get('processor_vcpus', ansible_facts.get('processor_count', 1)) | int >= 2
-    fail_msg: >-
-      Minimum supported host size is 2 vCPU and 2 GiB RAM.
-      Detected {{ ansible_facts.get('processor_vcpus', ansible_facts.get('processor_count', 1)) }} vCPU,
-      {{ ansible_facts['memtotal_mb'] }} MiB RAM.
-
-- name: Read root filesystem free space
-  ansible.builtin.set_fact:
-    matrix_root_mount: >-
-      {{ (ansible_facts['mounts'] | selectattr('mount', 'equalto', '/') | list | first) }}
-
-- name: Require at least 10 GiB free on root filesystem
-  ansible.builtin.assert:
-    that:
-      - matrix_root_mount.size_available | int >= 10737418240
-    fail_msg: 'At least 10 GiB free space is required on /.'
 
 - name: Resolve DNS A records for Matrix hostnames
   ansible.builtin.command:
@@ -273,6 +293,7 @@
       - 'Ubuntu 24.04 LTS: OK'
       - 'RAM: {{ ansible_facts["memtotal_mb"] }} MiB'
       - 'vCPU: {{ ansible_facts.get("processor_vcpus", ansible_facts.get("processor_count", 1)) }}'
+      - 'Root filesystem: {{ ((matrix_root_mount.size_total | int) / 1073741824) | round(1) }} GiB total, {{ ((matrix_root_mount.size_available | int) / 1073741824) | round(1) }} GiB free'
       - 'Public IPv4: {{ matrix_external_ip }}'
       - 'Coturn mode: {{ coturn_network_mode }} (relay={{ coturn_relay_ip }})'
       - 'SSH port: {{ matrix_ssh_port }}'

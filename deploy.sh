@@ -35,9 +35,20 @@ prompt_yes_no() {
   local answer
 
   [[ "$default" == 'n' ]] && suffix='[y/N]'
-  read -r -p "${prompt} ${suffix}: " answer
-  answer="${answer:-$default}"
-  [[ "$answer" =~ ^[Yy]$ ]]
+
+  while true; do
+    read -r -p "${prompt} ${suffix}: " answer
+    answer="${answer:-$default}"
+    answer="${answer//$'\r'/}"
+    answer="${answer#"${answer%%[![:space:]]*}"}"
+    answer="${answer%"${answer##*[![:space:]]}"}"
+
+    case "${answer,,}" in
+      y|yes) return 0 ;;
+      n|no) return 1 ;;
+      *) printf 'Please answer y/yes or n/no.\n' >&2 ;;
+    esac
+  done
 }
 
 detect_external_ipv4() {
@@ -80,6 +91,34 @@ is_dns_name() {
   done
 }
 
+is_acme_email() {
+  local email="$1"
+  local domain
+
+  [[ "$email" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$ ]] || return 1
+  domain="${email##*@}"
+
+  case "${domain,,}" in
+    example.com|*.example.com|example.org|*.example.org|example.net|*.example.net) return 1 ;;
+  esac
+
+  return 0
+}
+
+prompt_acme_email() {
+  local email
+
+  while true; do
+    read -r -p "Let's Encrypt email: " email
+    if is_acme_email "$email"; then
+      printf '%s' "$email"
+      return 0
+    fi
+
+    printf 'A real email address is required for Let\x27s Encrypt; example.com/example.org/example.net placeholders are not accepted.\n' >&2
+  done
+}
+
 is_ipv4() {
   local address="$1"
   python3 -c 'import ipaddress,sys; a=ipaddress.ip_address(sys.argv[1]); raise SystemExit(0 if a.version == 4 else 1)' "$address" >/dev/null 2>&1
@@ -102,7 +141,7 @@ if [[ ! -x "$ANSIBLE_PLAYBOOK" ]]; then
 fi
 
 if [[ -e "$CONFIG_FILE" ]]; then
-  fatal "an existing installation was found (${CONFIG_FILE}). Running deploy again would overwrite the topology and upgrade versions without a backup. Use converge.sh (or converge.sh --admin-password for an unfinished installation) or upgrade.sh."
+  fatal "an existing installation was found (${CONFIG_FILE}). Running deploy again would overwrite the topology and upgrade versions without a backup. Use 'matrix-deploy converge' (or 'matrix-deploy converge --admin-password' for an unfinished installation) or 'matrix-deploy upgrade'."
 fi
 
 install -d -m 0700 "$STATE_DIR" "$RUNTIME_DIR"
@@ -121,13 +160,13 @@ ADMIN_PREFIX="$(prompt_default 'Ketesa/Synapse Admin prefix' 'synad')"
 CALL_PREFIX="$(prompt_default 'Element Call prefix' 'call')"
 RTC_PREFIX="$(prompt_default 'LiveKit/MatrixRTC prefix' 'rtc')"
 TURN_PREFIX="$(prompt_default 'Legacy TURN prefix' 'turn')"
-CERTBOT_EMAIL="$(prompt_default "Let's Encrypt email" 'admin@example.com')"
+CERTBOT_EMAIL="$(prompt_acme_email)"
 
 is_dns_name "$BASE_DOMAIN" || fatal "invalid base domain: $BASE_DOMAIN"
 for prefix in "$SYNAPSE_PREFIX" "$ELEMENT_PREFIX" "$ADMIN_PREFIX" "$CALL_PREFIX" "$RTC_PREFIX" "$TURN_PREFIX"; do
   is_dns_label "$prefix" || fatal "invalid DNS prefix: $prefix"
 done
-[[ "$CERTBOT_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$ ]] || fatal "invalid Let's Encrypt email: $CERTBOT_EMAIL"
+is_acme_email "$CERTBOT_EMAIL" || fatal "invalid Let's Encrypt email: $CERTBOT_EMAIL"
 
 if prompt_yes_no 'Enable Matrix federation?' 'y'; then
   FEDERATION=true
@@ -222,7 +261,7 @@ log 'running Ansible preflight and resolving the latest stable upstream versions
 if ! prompt_yes_no 'Preflight succeeded. Start the deployment?' 'n'; then
   printf 'Deployment cancelled. Configuration saved: %s\n' "$CONFIG_FILE"
   printf 'Selected versions saved: %s\n' "$VERSION_LOCK_FILE"
-  printf 'To continue later: ./converge.sh --admin-password\n'
+  printf 'To continue later: matrix-deploy converge --admin-password\n'
   exit 0
 fi
 
